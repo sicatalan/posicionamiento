@@ -383,6 +383,12 @@ tabs = st.tabs([
 # 1) Resumen General
 with tabs[0]:
     st.subheader("Carga y diagnóstico")
+    st.caption("Notas: 'precio_análisis' = 'precio_unitario' si existe, de lo contrario 'precio' / 'peso_neto_umv'. Las estadísticas por canal se calculan sobre 'precio_análisis'.")
+    st.info(
+        "Como se calculan los datos principales:\n"
+        "- precio_analisis = 'precio_unitario' (si existe); de lo contrario 'precio' / 'peso_neto_umv'\n"
+        "- Las estadisticas por canal usan 'precio_analisis'."
+    )
     c1, c2, c3 = st.columns([1, 1, 2])
     with c1:
         st.metric("Filas", f"{model['diag']['filas']:,}")
@@ -405,6 +411,15 @@ with tabs[0]:
 # 2) Comparación canal interno vs resto (SKU)
 with tabs[1]:
     st.subheader("Comparación canal interno vs resto (nivel SKU)")
+    st.caption("Definiciones: 'precio_interno' = mediana de 'precio_análisis' del canal interno por SKU; 'precio_externo' = promedio en canales ≠ interno; gap_abs = precio_externo - precio_interno; gap_% = (precio_externo / precio_interno) - 1. La barra muestra el promedio de (precio_canal / precio_interno) por canal.")
+    st.info(
+        "Definiciones clave:\n"
+        "- precio_interno = mediana de 'precio_analisis' del canal interno por SKU\n"
+        "- precio_externo = promedio de 'precio_analisis' en canales != interno\n"
+        "- gap_abs = precio_externo - precio_interno\n"
+        "- gap_% = (precio_externo / precio_interno) - 1\n"
+        "- Grafico: promedio de (precio_canal / precio_interno) por canal"
+    )
     df = model["sku_comp"].copy()
     txt = st.text_input("Filtrar SKU o descripción (contiene)", key="filtro_sku_comp")
     if txt:
@@ -422,6 +437,12 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("Top desviaciones por SKU")
     # Gráficos de barras horizontales (categoría por color)
+    st.caption("Fórmulas: gap_abs = precio_externo - precio_interno; gap_% = (precio_externo / precio_interno) - 1.")
+    st.info(
+        "Formulas utilizadas:\n"
+        "- gap_abs = precio_externo - precio_interno\n"
+        "- gap_% = (precio_externo / precio_interno) - 1"
+    )
     gp1, gp2 = st.columns(2)
     with gp1:
         st.write("Top 20 gap positivo (externo > interno)")
@@ -493,6 +514,12 @@ with tabs[2]:
 # 4) Categoría | Familia: Top 15 y Box
 with tabs[3]:
     st.subheader("Agregado: Categoría | Familia")
+    st.caption("Se usa gap_% por SKU. 'Top 15' muestra el promedio de gap_% por Categoría | Familia; el boxplot muestra su distribución.")
+    st.info(
+        "Agregacion por Categoria | Familia:\n"
+        "- 'Top 15' muestra el promedio de gap_% por grupo\n"
+        "- El boxplot muestra la distribucion de gap_% en cada grupo"
+    )
     c1, c2 = st.columns([1, 1])
     with c1:
         st.write("Top 15 familias por gap % promedio (externo vs interno)")
@@ -518,6 +545,12 @@ with tabs[3]:
 # 5) Heatmap: ratio por Familia y Canal (vs interno)
 with tabs[4]:
     st.subheader("Heatmap: ratio promedio (canal / interno) por Categoría | Familia y Canal")
+    st.caption("ratio_vs_interno = precio_canal / precio_interno por SKU. El heatmap muestra el promedio de ese ratio por (Categoría | Familia, Canal).")
+    st.info(
+        "Heatmap (ratio vs interno):\n"
+        "- Por SKU: ratio_vs_interno = precio_canal / precio_interno\n"
+        "- Se muestra el promedio del ratio por (Categoria | Familia, Canal)"
+    )
     fam_canal = model["fam_canal"]
     fam_counts = model.get("fam_canal_counts")
     if fam_canal is not None and len(fam_canal):
@@ -618,6 +651,14 @@ with tabs[4]:
 # 6) Detalle por SKU x Fuente
 with tabs[5]:
     st.subheader("Detalle por SKU x Fuente (precios comparados)")
+    st.caption("Por SKU: min_ext = mínimo externo; max_ext = máximo externo; gap_min_% = (min_ext / interno) - 1; gap_max_% = (max_ext / interno) - 1.")
+    st.info(
+        "Detalle por SKU x Fuente:\n"
+        "- min_ext = minimo precio externo\n"
+        "- max_ext = maximo precio externo\n"
+        "- gap_min_% = (min_ext / interno) - 1\n"
+        "- gap_max_% = (max_ext / interno) - 1"
+    )
     pvt = model["pvt"].copy()
     txt = st.text_input("Filtrar SKU o descripción (contiene)", key="filtro_pvt")
     if txt:
@@ -659,6 +700,11 @@ with tabs[5]:
 # 7) Exportar
 with tabs[6]:
     st.subheader("Exportar resultados")
+    st.caption("Las tablas exportadas usan las definiciones anteriores de precios, gaps y ratios.")
+    st.info(
+        "Exportacion:\n"
+        "- Las tablas respetan las definiciones de precios, gaps y ratios"
+    )
     st.write("Descarga las tablas clave en Excel y CSV.")
 
     out_tables = {
