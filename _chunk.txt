@@ -1,0 +1,21 @@
+    st.subheader("Heatmap: ratio promedio (canal / interno) por Categoría | Familia y Canal")
+    st.caption("ratio_vs_interno = precio_canal / precio_interno por SKU. El heatmap muestra el promedio de ese ratio por (Categoría | Familia, Canal).")
+    st.info(
+        "Heatmap (ratio vs interno):\n"
+        "- Por SKU: ratio_vs_interno = precio_canal / precio_interno\n"
+        "- Se muestra el promedio del ratio por (Categoria | Familia, Canal)"
+    )
+    fam_canal = model["fam_canal"]
+    fam_counts = model.get("fam_canal_counts")
+    # Vista alternativa: barras facetadas por familia + distribucin por canal
+    if fam_canal is not None and len(fam_canal):
+        channels_new = list(fam_canal.columns)
+        sel_channels_new = st.multiselect("Canales a mostrar", options=channels_new, default=channels_new, key="hm_channels_new")
+        # Filtros de categor y familia
+        cat_opts_new = sorted([str(x) for x in model["data"]["categoria"].dropna().unique()]) if "categoria" in model["data"].columns else []
+        sel_cats_new = st.multiselect("Filtrar categor", options=cat_opts_new, key="hm_cats_new")
+        # Familias desde indice "Cat | Fam"
+        try:
+            fam_opts_new = sorted(pd.Series(fam_canal.index).astype(str).str.split(" | ").str[1].dropna().unique())
+        except Exception:
+            fam_opts_new = []

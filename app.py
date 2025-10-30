@@ -374,7 +374,7 @@ tabs = st.tabs([
     "Canal Interno vs Resto (SKU)",
     "Top Desviaciones SKU",
     "Cat | Fam (Top 15 y Box)",
-    "Heatmap Fam x Canal",
+    "Comparacion por Familia",
     "Detalle SKU x Fuente",
     "Exportar",
 ])
@@ -604,16 +604,151 @@ with tabs[3]:
 
 # 5) Heatmap: ratio por Familia y Canal (vs interno)
 with tabs[4]:
-    st.subheader("Heatmap: ratio promedio (canal / interno) por Categoría | Familia y Canal")
-    st.caption("ratio_vs_interno = precio_canal / precio_interno por SKU. El heatmap muestra el promedio de ese ratio por (Categoría | Familia, Canal).")
+    st.subheader("Comparacion por Familia: precios interno vs canales")
+    st.caption("Compara precios absolutos por familia entre el canal interno y otros canales. Filtra por categoria, familia y canales.")
     st.info(
-        "Heatmap (ratio vs interno):\n"
-        "- Por SKU: ratio_vs_interno = precio_canal / precio_interno\n"
-        "- Se muestra el promedio del ratio por (Categoria | Familia, Canal)"
+        "Lectura:\n"
+        "- Cada palito y marcador representa el precio agregado por canal (promedio por defecto, o mediana).\n"
+        "- El canal interno aparece destacado y puede incluirse/excluirse en los filtros."
     )
+    # Nota: Esta pestaña muestra ahora precios absolutos por familia y canal
+    st.caption("Vista actual: comparacion de precios por familia (interno vs canales) usando grafico tipo lollipop.")
     fam_canal = model["fam_canal"]
     fam_counts = model.get("fam_canal_counts")
+    # Vista alternativa: barras facetadas por familia + distribucin por canal
     if fam_canal is not None and len(fam_canal):
+        # Tomar canales desde los datos crudos para incluir tambien el interno
+        try:
+            channels_new = sorted(model["data"]["canal"].astype(str).dropna().unique().tolist())
+        except Exception:
+            channels_new = list(fam_canal.columns)
+        sel_channels_new = st.multiselect("Canales a mostrar", options=channels_new, default=channels_new, key="hm_channels_new")
+        # Filtros de categor y familia
+        cat_opts_new = sorted([str(x) for x in model["data"]["categoria"].dropna().unique()]) if "categoria" in model["data"].columns else []
+        sel_cats_new = st.multiselect("Filtrar categor", options=cat_opts_new, key="hm_cats_new")
+        # Familias desde indice "Cat | Fam"
+        try:
+            fam_opts_new = sorted(pd.Series(fam_canal.index).astype(str).str.split(" | ").str[1].dropna().unique())
+        except Exception:
+            fam_opts_new = []
+        sel_fams_new = st.multiselect("Filtrar familia", options=fam_opts_new, key="hm_fams_new")
+        # Controles especificos de la vista de precios
+        st.subheader("Precios por familia vs canales")
+        st.caption("Muestra precio interno y de canales por familia (lollipop)")
+        agg_opt = st.selectbox("Agregacion de precio", options=["mediana", "promedio"], index=1, key="fam_agg")
+        show_internal_always = st.checkbox("Mostrar canal interno destacado", value=True, key="fam_show_int")
+
+        # Construccion de tabla de precios por familia x canal (absoluto)
+        data_all = model["data"].copy()
+        if sel_cats_new and "categoria" in data_all.columns:
+            data_all = data_all[data_all["categoria"].astype(str).isin(sel_cats_new)]
+        if sel_fams_new and "familia" in data_all.columns:
+            data_all = data_all[data_all["familia"].astype(str).isin(sel_fams_new)]
+
+        # Precios por SKU
+        interno_sku = (
+            data_all.query("canal == @canal_interno")[["sku", "familia", "categoria", "precio_analisis"]]
+            .groupby(["sku", "familia", "categoria"], as_index=False)["precio_analisis"].median()
+            .rename(columns={"precio_analisis": "precio_interno"})
+        )
+        externo_sku = (
+            data_all.query("canal != @canal_interno")[["sku", "familia", "categoria", "canal", "precio_analisis"]]
+            .groupby(["sku", "familia", "categoria", "canal"], as_index=False)["precio_analisis"].median()
+            .rename(columns={"precio_analisis": "precio_canal"})
+        )
+
+        agg_func = "median" if agg_opt == "mediana" else "mean"
+        intern_fam = getattr(interno_sku.groupby(["categoria", "familia"])["precio_interno"], agg_func)().reset_index()
+        ext_fam = getattr(externo_sku.groupby(["categoria", "familia", "canal"])["precio_canal"], agg_func)().reset_index()
+
+        df_int_long = intern_fam.assign(canal=canal_interno, precio=intern_fam["precio_interno"])[["categoria", "familia", "canal", "precio"]]
+        df_ext_long = ext_fam.rename(columns={"precio_canal": "precio"})[["categoria", "familia", "canal", "precio"]]
+        df_prices = pd.concat([df_int_long, df_ext_long], ignore_index=True)
+
+        # Aplicar canales seleccionados
+        sel_can = sel_channels_new if sel_channels_new else list(df_prices["canal"].astype(str).unique())
+        df_prices = df_prices[df_prices["canal"].astype(str).isin(sel_can)]
+
+        if len(df_prices) == 0:
+            st.info("Sin datos para graficar con los filtros actuales.")
+        else:
+            familias = sorted(df_prices["familia"].astype(str).unique())
+            # Colores por canal
+            palette = px.colors.qualitative.Set2 + px.colors.qualitative.Set1 + px.colors.qualitative.Dark24
+            color_map = {c: palette[i % len(palette)] for i, c in enumerate(sel_can)}
+            if canal_interno in color_map:
+                color_map[canal_interno] = "#FFD54F"
+
+            # posiciones numericas por familia para separar canales
+            pos_map = {fam: i for i, fam in enumerate(familias)}
+            # Asegurar incluir interno destacado si se solicita
+            draw_canales = list(sel_can)
+            if show_internal_always and canal_interno not in draw_canales:
+                draw_canales = [canal_interno] + draw_canales
+            m = max(1, len(draw_canales))
+            try:
+                offsets = list(np.linspace(-0.22, 0.22, m))
+            except Exception:
+                offsets = [0] * m
+
+            fig = go.Figure()
+            for j, canal in enumerate(draw_canales):
+                # Asegurar único valor por familia/canal para evitar reindex con duplicados
+                ser = (
+                    df_prices[df_prices["canal"].astype(str) == str(canal)]
+                    .groupby("familia", as_index=True)["precio"]
+                    .agg("median" if agg_opt == "mediana" else "mean")
+                    .reindex(familias)
+                )
+                # Tallos (lollipop)
+                xs, ys = [], []
+                for fam, val in ser.items():
+                    if pd.notna(val):
+                        x0 = pos_map[fam] + offsets[j]
+                        xs += [x0, x0, None]
+                        ys += [0, val, None]
+                if xs:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=xs,
+                            y=ys,
+                            mode="lines",
+                            line=dict(color=color_map.get(canal, "#888"), width=(4 if str(canal)==str(canal_interno) else 2)),
+                            name=f"{canal} (tallo)",
+                            hoverinfo="skip",
+                            showlegend=False,
+                        )
+                    )
+                # Marcadores
+                fig.add_trace(
+                    go.Scatter(
+                        x=[pos_map[f] + offsets[j] for f in familias],
+                        y=ser.values,
+                        mode="markers",
+                        name=str(canal),
+                        marker=dict(
+                            color=color_map.get(canal, "#888"),
+                            size=13 if str(canal) == str(canal_interno) else 9,
+                            symbol="diamond" if str(canal) == str(canal_interno) else "circle",
+                        ),
+                        customdata=[[fam, str(canal)] for fam in familias],
+                        hovertemplate="familia=%{customdata[0]}<br>canal=%{customdata[1]}<br>precio=%{y:,.0f}<extra></extra>",
+                    )
+                )
+
+            fig.update_xaxes(tickmode="array", tickvals=list(range(len(familias))), ticktext=familias)
+            fig.update_layout(
+                xaxis_title="Familia",
+                yaxis_title="Precio",
+                margin=dict(l=200, r=40, t=40, b=80),
+                height=max(440, 48 * max(1, len(familias)) + 160),
+            )
+            # Bandas alternadas para separar familias visualmente
+            for i in range(len(familias)):
+                if i % 2 == 0:
+                    fig.add_vrect(x0=i-0.5, x1=i+0.5, fillcolor="rgba(255,255,255,0.03)", line_width=0, layer="below")
+            st.plotly_chart(fig, use_container_width=True)
+    if False and fam_canal is not None and len(fam_canal):
         # Controles
         channels = list(fam_canal.columns)
         sel_channels = st.multiselect("Canales a mostrar", options=channels, default=channels)
@@ -718,7 +853,7 @@ with tabs[4]:
 
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Sin datos suficientes para generar heatmap.")
+        pass
 
 
 # 6) Detalle por SKU x Fuente

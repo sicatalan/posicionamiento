@@ -1,0 +1,53 @@
+                color_map[canal_interno] = "#222222"
+
+            fig = go.Figure()
+            for canal in sel_can:
+                # Asegurar único valor por familia/canal para evitar reindex con duplicados
+                ser = (
+                    df_prices[df_prices["canal"].astype(str) == str(canal)]
+                    .groupby("familia", as_index=True)["precio"]
+                    .agg("mean")
+                    .reindex(familias)
+                )
+                # Tallos (lollipop)
+                xs, ys = [], []
+                for fam, val in ser.items():
+                    if pd.notna(val):
+                        xs += [fam, fam, None]
+                        ys += [0, val, None]
+                if xs:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=xs,
+                            y=ys,
+                            mode="lines",
+                            line=dict(color=color_map.get(canal), width=2),
+                            name=f"{canal} (tallo)",
+                            hoverinfo="skip",
+                            showlegend=False,
+                        )
+                    )
+                # Marcadores
+                fig.add_trace(
+                    go.Scatter(
+                        x=familias,
+                        y=ser.values,
+                        mode="markers",
+                        name=str(canal),
+                        marker=dict(
+                            color=color_map.get(canal),
+                            size=11 if str(canal) == str(canal_interno) else 9,
+                            symbol="diamond" if str(canal) == str(canal_interno) else "circle",
+                        ),
+                        hovertemplate="familia=%{x}<br>canal=%{text}<br>precio=%{y:,.0f}<extra></extra>",
+                        text=[str(canal)] * len(familias),
+                    )
+                )
+
+            fig.update_layout(
+                xaxis_title="Familia",
+                yaxis_title="Precio",
+                margin=dict(l=200, r=40, t=40, b=80),
+                height=max(440, 48 * max(1, len(familias)) + 160),
+            )
+            st.plotly_chart(fig, use_container_width=True)
