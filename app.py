@@ -420,14 +420,46 @@ with tabs[1]:
         "- gap_% = (precio_externo / precio_interno) - 1\n"
         "- Grafico: promedio de (precio_canal / precio_interno) por canal"
     )
+    # Filtro adicional por familia (afecta tabla y gráfico)
+    familias_opts = []
+    if "familia" in model["data"].columns:
+        familias_opts = sorted([str(x) for x in model["data"]["familia"].dropna().unique()])
+    fam_sel = st.multiselect(
+        "Filtrar por familia (afecta tabla y gráfico)", options=familias_opts, key="filtro_familia_canal"
+    )
     df = model["sku_comp"].copy()
+    if fam_sel:
+        df = df[df["familia"].astype(str).isin(fam_sel)]
     txt = st.text_input("Filtrar SKU o descripción (contiene)", key="filtro_sku_comp")
     if txt:
         df = filter_by_sku_text(df, txt)
     st.dataframe(df, use_container_width=True, height=480)
 
     st.markdown("Promedio de (precio canal / precio interno) por canal")
-    rc = model["res_canal"].reset_index()
+    # Si hay filtro de familia, recalcular el resumen por canal sobre el subconjunto
+    if fam_sel and len(fam_sel) and {"familia", "sku", "canal", "precio_analisis"}.issubset(model["data"].columns):
+        data_use = model["data"].copy()
+        data_use = data_use[data_use["familia"].astype(str).isin(fam_sel)]
+        interno_ref = (
+            data_use.query("canal == @canal_interno")[["sku", "precio_analisis"]]
+            .groupby("sku", as_index=False)["precio_analisis"].median()
+            .rename(columns={"precio_analisis": "precio_interno_ref"})
+        )
+        base_ratios_f = data_use.merge(interno_ref, on="sku", how="left")
+        base_ratios_f = base_ratios_f[
+            base_ratios_f["precio_interno_ref"].notna() & (base_ratios_f["precio_interno_ref"] > 0)
+        ].copy()
+        base_ratios_f["ratio_vs_interno"] = base_ratios_f["precio_analisis"] / base_ratios_f["precio_interno_ref"]
+        base_ratios_f = base_ratios_f.replace([np.inf, -np.inf], np.nan).dropna(subset=["ratio_vs_interno"])
+        rc = (
+            base_ratios_f[base_ratios_f["canal"] != canal_interno]
+            .groupby("canal")["ratio_vs_interno"].mean()
+            .rename("ratio_promedio_vs_interno")
+            .sort_values(ascending=False)
+            .reset_index()
+        )
+    else:
+        rc = model["res_canal"].reset_index()
     fig = px.bar(rc, x="canal", y="ratio_promedio_vs_interno", text=rc["ratio_promedio_vs_interno"].map(lambda x: f"{x:.2f}"))
     fig.update_layout(xaxis_title="Canal", yaxis_title="Ratio vs interno", height=420)
     st.plotly_chart(fig, use_container_width=True)
@@ -443,10 +475,23 @@ with tabs[2]:
         "- gap_abs = precio_externo - precio_interno\n"
         "- gap_% = (precio_externo / precio_interno) - 1"
     )
+    # Filtro por familia
+    fam_opts_td = []
+    if "familia" in model["data"].columns:
+        fam_opts_td = sorted([str(x) for x in model["data"]["familia"].dropna().unique()])
+    fam_sel_td = st.multiselect("Filtrar por familia (afecta gráficos y tablas)", options=fam_opts_td, key="filtro_familia_top")
+
+    # Preparar data filtrada
+    tp_all = model["top_pos"].copy()
+    tn_all = model["top_neg"].copy()
+    if fam_sel_td:
+        tp_all = tp_all[tp_all["familia"].astype(str).isin(fam_sel_td)]
+        tn_all = tn_all[tn_all["familia"].astype(str).isin(fam_sel_td)]
+
     gp1, gp2 = st.columns(2)
     with gp1:
         st.write("Top 20 gap positivo (externo > interno)")
-        tp = model["top_pos"].copy()
+        tp = tp_all.copy()
         if len(tp):
             tp["sku_label"] = (
                 tp["sku"].astype(str)
@@ -474,7 +519,7 @@ with tabs[2]:
             st.info("No hay datos para graficar top positivo.")
     with gp2:
         st.write("Top 20 gap negativo (interno > externo)")
-        tn = model["top_neg"].copy()
+        tn = tn_all.copy()
         if len(tn):
             tn["sku_label"] = (
                 tn["sku"].astype(str)
@@ -505,10 +550,10 @@ with tabs[2]:
     c1, c2 = st.columns(2)
     with c1:
         st.write("Tabla: Top 20 gap positivo (externo > interno)")
-        st.dataframe(model["top_pos"], use_container_width=True, height=520)
+        st.dataframe(tp_all, use_container_width=True, height=520)
     with c2:
         st.write("Tabla: Top 20 gap negativo (interno > externo)")
-        st.dataframe(model["top_neg"], use_container_width=True, height=520)
+        st.dataframe(tn_all, use_container_width=True, height=520)
 
 
 # 4) Categoría | Familia: Top 15 y Box
@@ -520,13 +565,28 @@ with tabs[3]:
         "- 'Top 15' muestra el promedio de gap_% por grupo\n"
         "- El boxplot muestra la distribucion de gap_% en cada grupo"
     )
+    # Filtro por familia
+    fam_opts_cf = []
+    if "familia" in model["data"].columns:
+        fam_opts_cf = sorted([str(x) for x in model["data"]["familia"].dropna().unique()])
+    fam_sel_cf = st.multiselect("Filtrar por familia (afecta Top 15 y Box)", options=fam_opts_cf, key="filtro_familia_catfam")
+
+    # Data filtrada
+    top15_cf = model["top15_cf"].copy()
+    df_box_all = model["df_box"].copy()
+    if fam_sel_cf:
+        if "familia" in top15_cf.columns:
+            top15_cf = top15_cf[top15_cf["familia"].astype(str).isin(fam_sel_cf)]
+        if "familia" in df_box_all.columns:
+            df_box_all = df_box_all[df_box_all["familia"].astype(str).isin(fam_sel_cf)]
+
     c1, c2 = st.columns([1, 1])
     with c1:
         st.write("Top 15 familias por gap % promedio (externo vs interno)")
-        st.dataframe(model["top15_cf"], use_container_width=True, height=520)
+        st.dataframe(top15_cf, use_container_width=True, height=520)
     with c2:
         st.write("Distribución gap % por Categoría | Familia")
-        df_box = model["df_box"]
+        df_box = df_box_all
         if len(df_box):
             fig_box = px.box(df_box, y="cat_fam", x="gap_pct", points="outliers")
             fig_box.update_layout(
@@ -557,6 +617,12 @@ with tabs[4]:
         # Controles
         channels = list(fam_canal.columns)
         sel_channels = st.multiselect("Canales a mostrar", options=channels, default=channels)
+        # Filtro por familia (desde 'Cat | Fam')
+        try:
+            fam_opts_hm = sorted(pd.Series(fam_canal.index).astype(str).str.split(" | ").str[1].dropna().unique())
+        except Exception:
+            fam_opts_hm = []
+        fam_sel_hm = st.multiselect("Filtrar familia (heatmap)", options=fam_opts_hm, key="filtro_familia_heatmap")
         filtro_texto = st.text_input("Filtrar Categoría | Familia (contiene)", key="filtro_heatmap")
         sort_by_dev = st.checkbox("Ordenar por desviación promedio (|ratio-1|)", value=True)
         show_numbers = st.checkbox("Mostrar números en celdas", value=False)
@@ -564,6 +630,13 @@ with tabs[4]:
         rango = st.slider("Rango de color (± alrededor de 1)", min_value=0.05, max_value=1.0, value=0.3, step=0.05)
 
         fc = fam_canal.copy()
+        # Aplicar filtro de familia primero
+        if 'fam_sel_hm' in locals() and fam_sel_hm:
+            try:
+                fam_part = pd.Series(fc.index, index=fc.index).astype(str).str.split(" | ").str[1]
+                fc = fc[fam_part.isin(fam_sel_hm)]
+            except Exception:
+                pass
         if sel_channels:
             fc = fc[sel_channels]
         if filtro_texto:
@@ -659,7 +732,15 @@ with tabs[5]:
         "- gap_min_% = (min_ext / interno) - 1\n"
         "- gap_max_% = (max_ext / interno) - 1"
     )
+    # Filtro por familia
+    fam_opts_pvt = []
+    if "familia" in model["pvt"].columns:
+        fam_opts_pvt = sorted([str(x) for x in model["pvt"]["familia"].dropna().unique()])
+    fam_sel_pvt = st.multiselect("Filtrar por familia (afecta la tabla)", options=fam_opts_pvt, key="filtro_familia_pvt")
+
     pvt = model["pvt"].copy()
+    if fam_sel_pvt and "familia" in pvt.columns:
+        pvt = pvt[pvt["familia"].astype(str).isin(fam_sel_pvt)]
     txt = st.text_input("Filtrar SKU o descripción (contiene)", key="filtro_pvt")
     if txt:
         pvt = filter_by_sku_text(pvt, txt)
