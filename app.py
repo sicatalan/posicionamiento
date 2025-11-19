@@ -111,7 +111,7 @@ def prepare_base(df: pd.DataFrame, canal_interno: str, usar_ultima_fecha: bool) 
 def prepare_maestro(maestro: pd.DataFrame) -> pd.DataFrame:
     m = maestro.copy()
     m.columns = [normalize_text(c) for c in m.columns]
-    keep = [c for c in ["sku", "categoria", "familia"] if c in m.columns]
+    keep = [c for c in ["sku", "categoria", "familia", "jefe_categoria"] if c in m.columns]
     m = m[keep].drop_duplicates()
     m["sku"] = m["sku"].astype(str).str.strip()
     return m
@@ -148,8 +148,9 @@ def build_model(base_df: pd.DataFrame, maestro_df: pd.DataFrame, canal_interno: 
         .agg(precio_externo=("precio_analisis", "mean"), canales_externos=("canal", "nunique"))
     )
 
+    maestro_meta_cols = [c for c in ["sku", "categoria", "familia", "jefe_categoria"] if c in maestro.columns]
     sku_comp = (
-        maestro[["sku", "categoria", "familia"]]
+        maestro[maestro_meta_cols]
         .merge(interno, on="sku", how="left")
         .merge(externo, on="sku", how="left")
     )
@@ -185,23 +186,33 @@ def build_model(base_df: pd.DataFrame, maestro_df: pd.DataFrame, canal_interno: 
 
     sku_ok["gap_abs_clip"] = sku_ok["gap_abs"].apply(clip_gap_abs)
 
-    top_pos = (
-        sku_ok.sort_values("gap_abs", ascending=False).head(20)[
-            ["sku", "descripcion", "categoria", "familia", "precio_interno", "precio_externo", "gap_abs", "gap_pct", "canales_externos", "gap_abs_clip"]
+    cols_top = [
+        c
+        for c in [
+            "sku",
+            "descripcion",
+            "jefe_categoria",
+            "categoria",
+            "familia",
+            "precio_interno",
+            "precio_externo",
+            "gap_abs",
+            "gap_pct",
+            "canales_externos",
+            "gap_abs_clip",
         ]
-    )
-    top_neg = (
-        sku_ok.sort_values("gap_abs", ascending=True).head(20)[
-            ["sku", "descripcion", "categoria", "familia", "precio_interno", "precio_externo", "gap_abs", "gap_pct", "canales_externos", "gap_abs_clip"]
-        ]
-    )
+        if c in sku_ok.columns
+    ]
+    top_pos = sku_ok.sort_values("gap_abs", ascending=False).head(20)[cols_top]
+    top_neg = sku_ok.sort_values("gap_abs", ascending=True).head(20)[cols_top]
 
     # Agregado Cat | Fam (box y top 15)
     df_box = sku_ok.copy()
     df_box["cat_fam"] = df_box["categoria"].astype(str) + " | " + df_box["familia"].astype(str)
 
+    group_cols_cf = [c for c in ["jefe_categoria", "categoria", "familia"] if c in df_box.columns]
     agg_cf = (
-        df_box.groupby(["categoria", "familia"], dropna=False)["gap_pct"]
+        df_box.groupby(group_cols_cf, dropna=False)["gap_pct"]
         .mean()
         .rename("gap_pct_prom")
         .reset_index()
@@ -233,10 +244,14 @@ def build_model(base_df: pd.DataFrame, maestro_df: pd.DataFrame, canal_interno: 
     )
     # Ordenar por categoría y familia para mejor legibilidad
     if {"categoria", "familia"}.issubset(data.columns):
+        meta_cols_cf = ["cat_fam", "categoria", "familia"]
+        if "jefe_categoria" in base_ratios.columns:
+            meta_cols_cf.append("jefe_categoria")
+        sort_cols_cf = [c for c in ["jefe_categoria", "categoria", "familia"] if c in base_ratios.columns]
         row_meta_df = (
-            base_ratios[["cat_fam", "categoria", "familia"]]
+            base_ratios[meta_cols_cf]
             .drop_duplicates()
-            .sort_values(["categoria", "familia"])  # natural
+            .sort_values(sort_cols_cf)  # natural
             .set_index("cat_fam")
         )
         orden_cf = row_meta_df.index
@@ -275,10 +290,10 @@ def build_model(base_df: pd.DataFrame, maestro_df: pd.DataFrame, canal_interno: 
         df_src.pivot_table(index=["sku"], columns="fuente_limpia", values="precio_analisis", aggfunc="first")
         .reset_index()
     )
-    meta_cols = [c for c in ["sku", "descripcion", "categoria", "familia"] if c in data.columns]
+    meta_cols = [c for c in ["sku", "descripcion", "jefe_categoria", "categoria", "familia"] if c in data.columns]
     if meta_cols:
         pvt = data.drop_duplicates("sku")[meta_cols].merge(pvt, on="sku", how="left")
-    cols_fuentes = [c for c in pvt.columns if c not in ["sku", "descripcion", "categoria", "familia", "interno"]]
+    cols_fuentes = [c for c in pvt.columns if c not in ["sku", "descripcion", "jefe_categoria", "categoria", "familia", "interno"]]
     if "interno" not in pvt.columns:
         pvt["interno"] = np.nan
     pvt["min_ext"], pvt["max_ext"] = pvt[cols_fuentes].min(axis=1, skipna=True), pvt[cols_fuentes].max(axis=1, skipna=True)
@@ -315,6 +330,46 @@ def filter_by_sku_text(df: pd.DataFrame, text: str, cols=("sku", "descripcion"))
             m = df[c].astype(str).str.contains(text, case=False, na=False)
             mask = m if mask is None else (mask | m)
     return df[mask] if mask is not None else df
+
+
+def get_jefe_categoria_options(df: Optional[pd.DataFrame]) -> list:
+    if df is None or "jefe_categoria" not in df.columns:
+        return []
+    return sorted(df["jefe_categoria"].dropna().astype(str).unique().tolist())
+
+
+def filter_by_jefe_categoria(df: Optional[pd.DataFrame], selected: list) -> Optional[pd.DataFrame]:
+    if df is None or not selected or "jefe_categoria" not in df.columns:
+        return df
+    return df[df["jefe_categoria"].astype(str).isin(selected)]
+
+
+def compute_ratio_vs_interno_por_canal(data: pd.DataFrame, canal_interno: str) -> pd.DataFrame:
+    if data is None or not {"sku", "canal", "precio_analisis"}.issubset(data.columns):
+        return pd.DataFrame(columns=["canal", "ratio_promedio_vs_interno"])
+    interno_ref = (
+        data.query("canal == @canal_interno")[["sku", "precio_analisis"]]
+        .groupby("sku", as_index=False)["precio_analisis"]
+        .median()
+        .rename(columns={"precio_analisis": "precio_interno_ref"})
+    )
+    base = data.merge(interno_ref, on="sku", how="left")
+    base = base[base["precio_interno_ref"].notna() & (base["precio_interno_ref"] > 0)].copy()
+    if base.empty:
+        return pd.DataFrame(columns=["canal", "ratio_promedio_vs_interno"])
+    base["ratio_vs_interno"] = base["precio_analisis"] / base["precio_interno_ref"]
+    base = base.replace([np.inf, -np.inf], np.nan).dropna(subset=["ratio_vs_interno"])
+    if base.empty:
+        return pd.DataFrame(columns=["canal", "ratio_promedio_vs_interno"])
+    rc = (
+        base[base["canal"] != canal_interno]
+        .groupby("canal")["ratio_vs_interno"]
+        .mean()
+        .rename("ratio_promedio_vs_interno")
+        .sort_values(ascending=False)
+        .reset_index()
+    )
+    return rc
 
 
 # -------------------------
@@ -403,8 +458,12 @@ with tabs[0]:
         st.dataframe(model["diag"]["stats_por_canal"], use_container_width=True)
 
     st.write("Datos base (post-limpieza)")
+    jefe_opts_resumen = get_jefe_categoria_options(model["data"])
+    jefe_sel_resumen = st.multiselect("Filtrar por jefe de categoría", options=jefe_opts_resumen, key="filtro_jefe_resumen")
     txt = st.text_input("Filtrar SKU o descripción (contiene)", key="filtro_resumen")
-    df_show = filter_by_sku_text(model["data"], txt)
+    df_show = model["data"].copy()
+    df_show = filter_by_jefe_categoria(df_show, jefe_sel_resumen)
+    df_show = filter_by_sku_text(df_show, txt)
     st.dataframe(df_show, use_container_width=True, height=420)
 
 
@@ -427,7 +486,10 @@ with tabs[1]:
     fam_sel = st.multiselect(
         "Filtrar por familia (afecta tabla y gráfico)", options=familias_opts, key="filtro_familia_canal"
     )
+    jefe_opts_canal = get_jefe_categoria_options(model["data"])
+    jefe_sel_canal = st.multiselect("Filtrar por jefe de categoría", options=jefe_opts_canal, key="filtro_jefe_canal")
     df = model["sku_comp"].copy()
+    df = filter_by_jefe_categoria(df, jefe_sel_canal)
     if fam_sel:
         df = df[df["familia"].astype(str).isin(fam_sel)]
     txt = st.text_input("Filtrar SKU o descripción (contiene)", key="filtro_sku_comp")
@@ -436,28 +498,13 @@ with tabs[1]:
     st.dataframe(df, use_container_width=True, height=480)
 
     st.markdown("Promedio de (precio canal / precio interno) por canal")
-    # Si hay filtro de familia, recalcular el resumen por canal sobre el subconjunto
-    if fam_sel and len(fam_sel) and {"familia", "sku", "canal", "precio_analisis"}.issubset(model["data"].columns):
-        data_use = model["data"].copy()
+    data_use = model["data"].copy()
+    data_use = filter_by_jefe_categoria(data_use, jefe_sel_canal)
+    if fam_sel and "familia" in data_use.columns:
         data_use = data_use[data_use["familia"].astype(str).isin(fam_sel)]
-        interno_ref = (
-            data_use.query("canal == @canal_interno")[["sku", "precio_analisis"]]
-            .groupby("sku", as_index=False)["precio_analisis"].median()
-            .rename(columns={"precio_analisis": "precio_interno_ref"})
-        )
-        base_ratios_f = data_use.merge(interno_ref, on="sku", how="left")
-        base_ratios_f = base_ratios_f[
-            base_ratios_f["precio_interno_ref"].notna() & (base_ratios_f["precio_interno_ref"] > 0)
-        ].copy()
-        base_ratios_f["ratio_vs_interno"] = base_ratios_f["precio_analisis"] / base_ratios_f["precio_interno_ref"]
-        base_ratios_f = base_ratios_f.replace([np.inf, -np.inf], np.nan).dropna(subset=["ratio_vs_interno"])
-        rc = (
-            base_ratios_f[base_ratios_f["canal"] != canal_interno]
-            .groupby("canal")["ratio_vs_interno"].mean()
-            .rename("ratio_promedio_vs_interno")
-            .sort_values(ascending=False)
-            .reset_index()
-        )
+    needs_recalc = bool(jefe_sel_canal or fam_sel)
+    if needs_recalc:
+        rc = compute_ratio_vs_interno_por_canal(data_use, canal_interno)
     else:
         rc = model["res_canal"].reset_index()
     fig = px.bar(rc, x="canal", y="ratio_promedio_vs_interno", text=rc["ratio_promedio_vs_interno"].map(lambda x: f"{x:.2f}"))
@@ -480,10 +527,14 @@ with tabs[2]:
     if "familia" in model["data"].columns:
         fam_opts_td = sorted([str(x) for x in model["data"]["familia"].dropna().unique()])
     fam_sel_td = st.multiselect("Filtrar por familia (afecta gráficos y tablas)", options=fam_opts_td, key="filtro_familia_top")
+    jefe_opts_td = get_jefe_categoria_options(model["data"])
+    jefe_sel_td = st.multiselect("Filtrar por jefe de categoría", options=jefe_opts_td, key="filtro_jefe_top")
 
     # Preparar data filtrada
     tp_all = model["top_pos"].copy()
     tn_all = model["top_neg"].copy()
+    tp_all = filter_by_jefe_categoria(tp_all, jefe_sel_td)
+    tn_all = filter_by_jefe_categoria(tn_all, jefe_sel_td)
     if fam_sel_td:
         tp_all = tp_all[tp_all["familia"].astype(str).isin(fam_sel_td)]
         tn_all = tn_all[tn_all["familia"].astype(str).isin(fam_sel_td)]
@@ -570,6 +621,8 @@ with tabs[3]:
     if "familia" in model["data"].columns:
         fam_opts_cf = sorted([str(x) for x in model["data"]["familia"].dropna().unique()])
     fam_sel_cf = st.multiselect("Filtrar por familia (afecta Top 15 y Box)", options=fam_opts_cf, key="filtro_familia_catfam")
+    jefe_opts_cf = get_jefe_categoria_options(model["data"])
+    jefe_sel_cf = st.multiselect("Filtrar por jefe de categoría", options=jefe_opts_cf, key="filtro_jefe_catfam")
 
     # Data filtrada
     top15_cf = model["top15_cf"].copy()
@@ -579,6 +632,8 @@ with tabs[3]:
             top15_cf = top15_cf[top15_cf["familia"].astype(str).isin(fam_sel_cf)]
         if "familia" in df_box_all.columns:
             df_box_all = df_box_all[df_box_all["familia"].astype(str).isin(fam_sel_cf)]
+    top15_cf = filter_by_jefe_categoria(top15_cf, jefe_sel_cf)
+    df_box_all = filter_by_jefe_categoria(df_box_all, jefe_sel_cf)
 
     c1, c2 = st.columns([1, 1])
     with c1:
@@ -615,16 +670,28 @@ with tabs[4]:
     st.caption("Vista actual: comparacion de precios por familia (interno vs canales) usando grafico tipo lollipop.")
     fam_canal = model["fam_canal"]
     fam_counts = model.get("fam_canal_counts")
+    row_meta = model.get("row_meta")
+    jefe_opts_fam = get_jefe_categoria_options(model["data"])
+    jefe_sel_fam = st.multiselect("Filtrar por jefe de categoría", options=jefe_opts_fam, key="filtro_jefe_fam_canal")
+    fam_canal = fam_canal.copy() if fam_canal is not None else None
+    fam_counts = fam_counts.copy() if fam_counts is not None else None
+    if fam_canal is not None and jefe_sel_fam and row_meta is not None and "jefe_categoria" in row_meta.columns:
+        idx_keep = row_meta[row_meta["jefe_categoria"].astype(str).isin(jefe_sel_fam)].index
+        fam_canal = fam_canal.loc[fam_canal.index.intersection(idx_keep)]
+        if fam_counts is not None:
+            fam_counts = fam_counts.loc[fam_counts.index.intersection(idx_keep)]
+    data_tab = model["data"].copy()
+    data_tab = filter_by_jefe_categoria(data_tab, jefe_sel_fam)
     # Vista alternativa: barras facetadas por familia + distribucin por canal
     if fam_canal is not None and len(fam_canal):
         # Tomar canales desde los datos crudos para incluir tambien el interno
         try:
-            channels_new = sorted(model["data"]["canal"].astype(str).dropna().unique().tolist())
+            channels_new = sorted(data_tab["canal"].astype(str).dropna().unique().tolist())
         except Exception:
             channels_new = list(fam_canal.columns)
         sel_channels_new = st.multiselect("Canales a mostrar", options=channels_new, default=channels_new, key="hm_channels_new")
         # Filtros de categor y familia
-        cat_opts_new = sorted([str(x) for x in model["data"]["categoria"].dropna().unique()]) if "categoria" in model["data"].columns else []
+        cat_opts_new = sorted([str(x) for x in data_tab["categoria"].dropna().unique()]) if "categoria" in data_tab.columns else []
         sel_cats_new = st.multiselect("Filtrar categor", options=cat_opts_new, key="hm_cats_new")
         # Familias desde indice "Cat | Fam"
         try:
@@ -639,7 +706,7 @@ with tabs[4]:
         show_internal_always = st.checkbox("Mostrar canal interno destacado", value=True, key="fam_show_int")
 
         # Construccion de tabla de precios por familia x canal (absoluto)
-        data_all = model["data"].copy()
+        data_all = data_tab.copy()
         if sel_cats_new and "categoria" in data_all.columns:
             data_all = data_all[data_all["categoria"].astype(str).isin(sel_cats_new)]
         if sel_fams_new and "familia" in data_all.columns:
@@ -872,8 +939,11 @@ with tabs[5]:
     if "familia" in model["pvt"].columns:
         fam_opts_pvt = sorted([str(x) for x in model["pvt"]["familia"].dropna().unique()])
     fam_sel_pvt = st.multiselect("Filtrar por familia (afecta la tabla)", options=fam_opts_pvt, key="filtro_familia_pvt")
+    jefe_opts_pvt = get_jefe_categoria_options(model["pvt"])
+    jefe_sel_pvt = st.multiselect("Filtrar por jefe de categoría", options=jefe_opts_pvt, key="filtro_jefe_pvt")
 
     pvt = model["pvt"].copy()
+    pvt = filter_by_jefe_categoria(pvt, jefe_sel_pvt)
     if fam_sel_pvt and "familia" in pvt.columns:
         pvt = pvt[pvt["familia"].astype(str).isin(fam_sel_pvt)]
     txt = st.text_input("Filtrar SKU o descripción (contiene)", key="filtro_pvt")
@@ -922,11 +992,24 @@ with tabs[6]:
         "- Las tablas respetan las definiciones de precios, gaps y ratios"
     )
     st.write("Descarga las tablas clave en Excel y CSV.")
+    jefe_opts_export = get_jefe_categoria_options(model["data"])
+    jefe_sel_export = st.multiselect("Filtrar por jefe de categoría (afecta las descargas)", options=jefe_opts_export, key="filtro_jefe_export")
+
+    data_export = model["data"].copy()
+    data_export = filter_by_jefe_categoria(data_export, jefe_sel_export)
+    sku_comp_export = filter_by_jefe_categoria(model["sku_comp"].copy(), jefe_sel_export)
+    pvt_export = filter_by_jefe_categoria(model["pvt"].copy(), jefe_sel_export)
+    if jefe_sel_export:
+        canal_vs_interno = compute_ratio_vs_interno_por_canal(data_export, canal_interno)
+    else:
+        canal_vs_interno = model["res_canal"].reset_index()
+    if canal_vs_interno.empty:
+        canal_vs_interno = pd.DataFrame(columns=["canal", "ratio_promedio_vs_interno"])
 
     out_tables = {
-        "sku_comp": model["sku_comp"],
-        "canal_vs_interno": model["res_canal"],
-        "precios_por_fuente": model["pvt"],
+        "sku_comp": sku_comp_export,
+        "canal_vs_interno": canal_vs_interno,
+        "precios_por_fuente": pvt_export,
     }
 
     # Excel único con hojas
@@ -943,7 +1026,7 @@ with tabs[6]:
     )
 
     # CSV adicional de precios por fuente
-    csv_bytes = model["pvt"].to_csv(index=False).encode("utf-8")
+    csv_bytes = pvt_export.to_csv(index=False).encode("utf-8")
     st.download_button(
         label="Descargar CSV (precios_por_fuente.csv)",
         data=csv_bytes,
